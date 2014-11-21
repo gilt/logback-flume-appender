@@ -11,10 +11,7 @@ import org.apache.flume.event.EventBuilder;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.Charset;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class FlumeLogstashV1Appender extends UnsynchronizedAppenderBase<ILoggingEvent> {
 
@@ -23,6 +20,14 @@ public class FlumeLogstashV1Appender extends UnsynchronizedAppenderBase<ILogging
   private FlumeAvroManager flumeManager;
 
   private String flumeAgents;
+
+  private String flumeProperties;
+
+  private Long reportingWindow;
+
+  private Integer batchSize;
+
+  private Map<String, String> additionalProperties;
 
   private String application;
 
@@ -52,6 +57,30 @@ public class FlumeLogstashV1Appender extends UnsynchronizedAppenderBase<ILogging
     this.flumeAgents = flumeAgents;
   }
 
+  public void setFlumeProperties(String flumeProperties) {
+    this.flumeProperties = flumeProperties;
+  }
+
+  public void setAdditionalProperties(String additionalProperties) {
+    this.additionalProperties = extractProperties(additionalProperties);
+  }
+
+  public void setBatchSize(String batchSizeStr) {
+    try {
+      this.batchSize = Integer.parseInt(batchSizeStr);
+    } catch (NumberFormatException nfe) {
+      addWarn("Cannot set the batchSize to " + batchSizeStr, nfe);
+    }
+  }
+
+  public void setReportingWindow(String reportingWindowStr) {
+    try {
+      this.reportingWindow = Long.parseLong(reportingWindowStr);
+    } catch (NumberFormatException nfe) {
+      addWarn("Cannot set the reportingWindow to " + reportingWindowStr, nfe);
+    }
+  }
+
   @Override
   public void start() {
     if (layout == null) {
@@ -73,12 +102,37 @@ public class FlumeLogstashV1Appender extends UnsynchronizedAppenderBase<ILogging
           addWarn("Cannot build a Flume agent config for '" + conf + "'");
         }
       }
-      flumeManager = FlumeAvroManager.create(agents, this);
+      Properties overrides = new Properties();
+      overrides.putAll(extractProperties(flumeProperties));
+      flumeManager = FlumeAvroManager.create(agents, overrides, batchSize, reportingWindow, this);
     } else {
       addError("Cannot configure a flume agent with an empty configuration");
     }
     super.start();
 
+  }
+
+  private Map<String, String> extractProperties(String flumeProperties) {
+    final Map<String, String> props = new HashMap<String, String>();
+    if (StringUtils.isNotEmpty(flumeProperties)) {
+      final String[] segments = flumeProperties.split(";");
+      for (final String segment : segments) {
+        final String[] pair = segment.split("=");
+        if (pair.length == 2) {
+          final String key = pair[0].trim();
+          final String value = pair[1].trim();
+          if (StringUtils.isNotEmpty(key) && StringUtils.isNotEmpty(value)) {
+            props.put(key, value);
+          }
+        } else {
+          addWarn("Cannot accept properties where key or value is empty: " + segment);
+        }
+      }
+    } else {
+      addInfo("Not overriding any flume agent properties");
+    }
+
+    return props;
   }
 
   @Override
@@ -98,12 +152,14 @@ public class FlumeLogstashV1Appender extends UnsynchronizedAppenderBase<ILogging
     if (flumeManager != null) {
       try {
         String body = layout != null ? layout.doLayout(eventObject) : eventObject.getFormattedMessage();
-        Map<String, String> headers = extractHeaders(eventObject);
+        Map<String, String> headers = new HashMap<String, String>();
+        headers.putAll(additionalProperties);
+        headers.putAll(extractHeaders(eventObject));
 
         Event event = EventBuilder.withBody(body.trim(), UTF_8, headers);
 
         flumeManager.send(event);
-      } catch( Exception e) {
+      } catch (Exception e) {
         addError(e.getLocalizedMessage(), e);
       }
     }
